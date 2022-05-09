@@ -1,9 +1,9 @@
-module github.com/clarify/rested/storers/mongo
+module github.com/drdeee/rested/storers/mongo
 
 go 1.17
 
 require (
-	github.com/clarify/rested v0.1.1
+	github.com/drdeee/rested v0.1.1
 	github.com/rs/cors v1.6.0
 )
 
