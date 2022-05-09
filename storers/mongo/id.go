@@ -6,7 +6,7 @@ import (
 	"fmt"
 
 	"github.com/clarify/rested/schema"
-	"gopkg.in/mgo.v2/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 var (
@@ -14,7 +14,7 @@ var (
 	// value is nil to be used in schema with OnInit.
 	NewObjectID = func(ctx context.Context, value interface{}) interface{} {
 		if value == nil {
-			value = bson.NewObjectId().Hex()
+			value = primitive.NewObjectID().Hex()
 		}
 		return value
 	}
@@ -36,7 +36,7 @@ type ObjectID struct{}
 
 // Validate implements FieldValidator interface
 func (v ObjectID) Validate(value interface{}) (interface{}, error) {
-	_, ok := value.(bson.ObjectId)
+	_, ok := value.(primitive.ObjectID)
 	if ok {
 		return value, nil
 	}
@@ -47,15 +47,16 @@ func (v ObjectID) Validate(value interface{}) (interface{}, error) {
 	if len(s) != 24 {
 		return nil, errors.New("invalid object id length")
 	}
-	if !bson.IsObjectIdHex(s) {
+	if _, err := primitive.ObjectIDFromHex(s); err != nil {
 		return nil, fmt.Errorf("invalid object id")
+	} else {
+		return value, nil
 	}
-	return bson.ObjectIdHex(s), nil
 }
 
 // Serialize implements FieldSerializer interface
 func (v ObjectID) Serialize(value interface{}) (interface{}, error) {
-	id, ok := value.(bson.ObjectId)
+	id, ok := value.(primitive.ObjectID)
 	if !ok {
 		return nil, errors.New("not an ObjectId")
 	}

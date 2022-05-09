@@ -1,10 +1,13 @@
 package mongo
 
 import (
+	"context"
+
 	"github.com/clarify/rested/resource"
 	"github.com/clarify/rested/schema/query"
-	mgo "gopkg.in/mgo.v2"
-	"gopkg.in/mgo.v2/bson"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 // getField translate a schema field into a MongoDB field:
@@ -24,41 +27,45 @@ func getQuery(q *query.Query) (bson.M, error) {
 
 // getSort transform a resource.Lookup into a Mongo sort list.
 // If the sort list is empty, fallback to _id.
-func getSort(q *query.Query) []string {
+func getSort(q *query.Query) *options.FindOptions {
+	options := options.Find()
 	if len(q.Sort) == 0 {
-		return []string{"_id"}
+		return options.SetSort(bson.M{"_id": 1})
 	}
-	s := make([]string, len(q.Sort))
-	for i, sort := range q.Sort {
-		if sort.Reversed {
-			s[i] = "-" + getField(sort.Name)
+	sort := bson.M{}
+	for _, s := range q.Sort {
+		if s.Reversed {
+			sort[getField(s.Name)] = -1
 		} else {
-			s[i] = getField(sort.Name)
+			sort[getField(s.Name)] = 1
 		}
 	}
-	return s
+	options.SetSort(sort)
+	return options
 }
 
-func applyWindow(mq *mgo.Query, w query.Window) *mgo.Query {
+func applyWindow(mq *options.FindOptions, w query.Window) *options.FindOptions {
 	if w.Offset > 0 {
-		mq = mq.Skip(w.Offset)
+		mq = mq.SetSkip(int64(w.Offset))
 	}
 	if w.Limit > -1 {
-		mq = mq.Limit(w.Limit)
+		mq = mq.SetLimit(int64(w.Limit))
 	}
 	return mq
 }
 
-func selectIDs(c *mgo.Collection, mq *mgo.Query) ([]interface{}, error) {
+func selectIDs(ctx context.Context, cursor *mongo.Cursor) ([]interface{}, error) {
 	var ids []interface{}
 	tmp := struct {
 		ID interface{} `bson:"_id"`
 	}{}
-	it := mq.Select(bson.M{"_id": 1}).Iter()
-	for it.Next(&tmp) {
+	for cursor.Next(ctx) {
+		if err := cursor.Decode(&tmp); err != nil {
+			return nil, err
+		}
 		ids = append(ids, tmp.ID)
 	}
-	if err := it.Close(); err != nil {
+	if err := cursor.Close(ctx); err != nil {
 		return nil, err
 	}
 	return ids, nil

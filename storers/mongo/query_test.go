@@ -176,27 +176,3 @@ func TestTranslatePredicateInvalid(t *testing.T) {
 		t.Errorf("expected ErrNotImplemented, got %v", err)
 	}
 }
-
-func TestGetSort(t *testing.T) {
-	var s []string
-	s = getSort(&query.Query{Sort: query.Sort{}})
-	if expect := []string{"_id"}; !reflect.DeepEqual(expect, s) {
-		t.Errorf("expected %v, got %v", expect, s)
-	}
-	s = getSort(&query.Query{Sort: query.Sort{{Name: "id"}}})
-	if expect := []string{"_id"}; !reflect.DeepEqual(expect, s) {
-		t.Errorf("expected %v, got %v", expect, s)
-	}
-	s = getSort(&query.Query{Sort: query.Sort{{Name: "f"}}})
-	if expect := []string{"f"}; !reflect.DeepEqual(expect, s) {
-		t.Errorf("expected %v, got %v", expect, s)
-	}
-	s = getSort(&query.Query{Sort: query.Sort{{Name: "f", Reversed: true}}})
-	if expect := []string{"-f"}; !reflect.DeepEqual(expect, s) {
-		t.Errorf("expected %v, got %v", expect, s)
-	}
-	s = getSort(&query.Query{Sort: query.Sort{{Name: "f"}, {Name: "f", Reversed: true}}})
-	if expect := []string{"f", "-f"}; !reflect.DeepEqual(expect, s) {
-		t.Errorf("expected %v, got %v", expect, s)
-	}
-}

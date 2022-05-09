@@ -1,17 +1,19 @@
 package mongo_test
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/clarify/rested/resource"
 	"github.com/clarify/rested/rest"
 	"github.com/clarify/rested/schema"
+	mgo "github.com/clarify/rested/storers/mongo"
 	"github.com/rs/cors"
-	mgo "gopkg.in/mgo.v2"
-
-	"github.com/clarify/rested/storers/mongo"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 var (
@@ -70,19 +72,18 @@ var (
 )
 
 func Example() {
-	session, err := mgo.Dial(os.Getenv("GOTEST_MONGODB") + "/exampledb")
-	if err != nil {
-		log.Fatalf("Can't connect to MongoDB: %s", err)
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	client, err := mongo.Connect(ctx, options.Client().ApplyURI(os.Getenv("GOTEST_MONGODB")+"/exampledb"))
 	db := "test_rest_layer"
 
 	index := resource.NewIndex()
 
-	users := index.Bind("users", user, mongo.NewHandler(session, db, "users"), resource.Conf{
+	users := index.Bind("users", user, mgo.NewHandler(client, db, "users"), resource.Conf{
 		AllowedModes: resource.ReadWrite,
 	})
 
-	users.Bind("posts", "user", post, mongo.NewHandler(session, db, "posts"), resource.Conf{
+	users.Bind("posts", "user", post, mgo.NewHandler(client, db, "posts"), resource.Conf{
 		AllowedModes: resource.ReadWrite,
 	})
 

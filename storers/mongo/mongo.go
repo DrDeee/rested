@@ -9,8 +9,9 @@ import (
 
 	"github.com/clarify/rested/resource"
 	"github.com/clarify/rested/schema/query"
-	mgo "gopkg.in/mgo.v2"
-	"gopkg.in/mgo.v2/bson"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo"
 )
 
 // mongoItem is a bson representation of a resource.Item.
@@ -55,7 +56,7 @@ func newItem(i *mongoItem) *resource.Item {
 	}
 
 	if item.ETag == "" {
-		if v, ok := i.ID.(bson.ObjectId); ok {
+		if v, ok := i.ID.(primitive.ObjectID); ok {
 			item.ETag = "p-" + v.Hex()
 		} else {
 			item.ETag = "p-" + fmt.Sprint(i.ID)
@@ -65,48 +66,16 @@ func newItem(i *mongoItem) *resource.Item {
 }
 
 // Handler handles resource storage in a MongoDB collection.
-type Handler func(ctx context.Context) (*mgo.Collection, error)
+type Handler func(ctx context.Context) (*mongo.Collection, error)
 
 // NewHandler creates an new mongo handler
-func NewHandler(s *mgo.Session, db, collection string) Handler {
-	c := func() *mgo.Collection {
-		return s.DB(db).C(collection)
+func NewHandler(c *mongo.Client, db, collectionName string) Handler {
+	collection := func() *mongo.Collection {
+		return c.Database(db).Collection(collectionName)
 	}
-	return func(ctx context.Context) (*mgo.Collection, error) {
-		return c(), nil
+	return func(ctx context.Context) (*mongo.Collection, error) {
+		return collection(), nil
 	}
-}
-
-// C returns the mongo collection managed by this storage handler
-// from a Copy() of the mgo session.
-func (m Handler) c(ctx context.Context) (*mgo.Collection, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	c, err := m(ctx)
-	if err != nil {
-		return nil, err
-	}
-	// With mgo, session.Copy() pulls a connection from the connection pool
-	s := c.Database.Session.Copy()
-	// Ensure safe mode is enabled in order to get errors
-	s.EnsureSafe(&mgo.Safe{})
-	// Set a timeout to match the context deadline if any
-	if deadline, ok := ctx.Deadline(); ok {
-		timeout := time.Until(deadline)
-		if timeout <= 0 {
-			timeout = 0
-		}
-		s.SetSocketTimeout(timeout)
-		s.SetSyncTimeout(timeout)
-	}
-	c.Database.Session = s
-	return c, nil
-}
-
-// close returns a mgo.Collection's session to the connection pool.
-func (m Handler) close(c *mgo.Collection) {
-	c.Database.Session.Close()
 }
 
 // Insert inserts new items in the mongo collection.
@@ -115,13 +84,12 @@ func (m Handler) Insert(ctx context.Context, items []*resource.Item) error {
 	for i, item := range items {
 		mItems[i] = newMongoItem(item)
 	}
-	c, err := m.c(ctx)
+	c, err := m(ctx)
 	if err != nil {
 		return err
 	}
-	defer m.close(c)
-	err = c.Insert(mItems...)
-	if mgo.IsDup(err) {
+	_, err = c.InsertMany(ctx, mItems)
+	if mongo.IsDuplicateKeyError(err) {
 		// Duplicate ID key
 		err = resource.ErrConflict
 	}
@@ -134,11 +102,10 @@ func (m Handler) Insert(ctx context.Context, items []*resource.Item) error {
 // Update replace an item by a new one in the mongo collection.
 func (m Handler) Update(ctx context.Context, item *resource.Item, original *resource.Item) error {
 	mItem := newMongoItem(item)
-	c, err := m.c(ctx)
+	c, err := m(ctx)
 	if err != nil {
 		return err
 	}
-	defer m.close(c)
 	s := bson.M{"_id": original.ID}
 	if strings.HasPrefix(original.ETag, "p-") {
 		// If the original ETag is in "p-[id]" format,
@@ -147,14 +114,13 @@ func (m Handler) Update(ctx context.Context, item *resource.Item, original *reso
 	} else {
 		s["_etag"] = original.ETag
 	}
-	err = c.Update(s, mItem)
-	if err == mgo.ErrNotFound {
+	_, err = c.UpdateByID(ctx, original.ID, mItem)
+	if err == mongo.ErrNoDocuments {
 		// Determine if the item is not found or if the item is found but etag missmatch
-		var count int
-		count, err = c.FindId(original.ID).Count()
-		if err != nil {
-			// The find returned an unexpected err, just forward it with no mapping
-		} else if count == 0 {
+		var object interface{}
+		result := c.FindOne(ctx, bson.M{"_id": original.ID})
+		err := result.Decode(object)
+		if err == mongo.ErrNoDocuments {
 			err = resource.ErrNotFound
 		} else if ctx.Err() != nil {
 			err = ctx.Err()
@@ -162,17 +128,17 @@ func (m Handler) Update(ctx context.Context, item *resource.Item, original *reso
 			// If the item were found, it means that its etag didn't match
 			err = resource.ErrConflict
 		}
+		return err
 	}
 	return err
 }
 
 // Delete deletes an item from the mongo collection.
 func (m Handler) Delete(ctx context.Context, item *resource.Item) error {
-	c, err := m.c(ctx)
+	c, err := m(ctx)
 	if err != nil {
 		return err
 	}
-	defer m.close(c)
 	s := bson.M{"_id": item.ID}
 	if strings.HasPrefix(item.ETag, "p-") {
 		// If the item ETag is in "p-[id]" format,
@@ -181,20 +147,18 @@ func (m Handler) Delete(ctx context.Context, item *resource.Item) error {
 	} else {
 		s["_etag"] = item.ETag
 	}
-	err = c.Remove(s)
-	if err == mgo.ErrNotFound {
-		// Determine if the item is not found or if the item is found but etag missmatch
-		var count int
-		count, err = c.FindId(item.ID).Count()
-		if err != nil {
-			// The find returned an unexpected err, just forward it with no mapping
-		} else if count == 0 {
-			err = resource.ErrNotFound
+	_, err = c.DeleteOne(ctx, s)
+	if err == mongo.ErrNoDocuments {
+		var object interface{}
+		result := c.FindOne(ctx, bson.M{"_id": item.ID})
+		err := result.Decode(object)
+		if err == mongo.ErrNoDocuments {
+			return resource.ErrNotFound
 		} else if ctx.Err() != nil {
-			err = ctx.Err()
+			return ctx.Err()
 		} else {
 			// If the item were found, it means that its etag didn't match
-			err = resource.ErrConflict
+			return resource.ErrConflict
 		}
 	}
 	return err
@@ -212,11 +176,10 @@ func (m Handler) Clear(ctx context.Context, q *query.Query) (int, error) {
 		return 0, err
 	}
 
-	c, err := m.c(ctx)
+	c, err := m(ctx)
 	if err != nil {
 		return 0, err
 	}
-	defer m.close(c)
 
 	if q.Window != nil {
 		// RemoveAll does not allow skip and limit to be set. To workaround
@@ -226,10 +189,16 @@ func (m Handler) Clear(ctx context.Context, q *query.Query) (int, error) {
 		// This solution does not handle the case where a query containg all
 		// IDs is larger than the maximum BSON document size in MongoDB:
 		// https://docs.mongodb.com/manual/reference/limits/#bson-documents
-		srt := getSort(q)
-		mq := applyWindow(c.Find(qry).Sort(srt...), *q.Window)
+		options := getSort(q)
+		options = applyWindow(options, *q.Window)
+		options = options.SetProjection(bson.M{"_id": 1})
 
-		if ids, err := selectIDs(c, mq); err == nil {
+		request, err := c.Find(ctx, qry, options)
+		if err != nil {
+			return 0, err
+		}
+
+		if ids, err := selectIDs(ctx, request); err == nil {
 			qry = bson.M{"_id": bson.M{"$in": ids}}
 		} else {
 			return 0, err
@@ -238,14 +207,14 @@ func (m Handler) Clear(ctx context.Context, q *query.Query) (int, error) {
 
 	// We handle the potential of partial failure by returning both the number
 	// of removed items and an error, if both are present.
-	info, err := c.RemoveAll(qry)
+	info, err := c.DeleteMany(ctx, qry)
 	if err == nil {
 		err = ctx.Err()
 	}
 	if info == nil {
 		return 0, err
 	}
-	return info.Removed, err
+	return int(info.DeletedCount), err
 }
 
 // Find items from the mongo collection matching the provided query.
@@ -270,31 +239,19 @@ func (m Handler) Find(ctx context.Context, q *query.Query) (*resource.ItemList, 
 		return nil, err
 	}
 	srt := getSort(q)
+	srt = applyWindow(srt, *q.Window)
 
-	c, err := m.c(ctx)
+	c, err := m(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer m.close(c)
 
-	mq := c.Find(qry).Sort(srt...)
+	mq, err := c.Find(ctx, qry, srt)
 	limit := -1
 	if q.Window != nil {
-		mq = applyWindow(mq, *q.Window)
 		limit = q.Window.Limit
 	}
 
-	// Apply context deadline if any
-	if dl, ok := ctx.Deadline(); ok {
-		dur := time.Until(dl)
-		if dur < 0 {
-			dur = 0
-		}
-		mq.SetMaxTime(dur)
-	}
-
-	// Perform request
-	iter := mq.Iter()
 	// Total is set to -1 because we have no easy way with MongoDB to to compute
 	// this value without performing two requests.
 	list := &resource.ItemList{
@@ -304,16 +261,17 @@ func (m Handler) Find(ctx context.Context, q *query.Query) (*resource.ItemList, 
 	}
 
 	var mItem mongoItem
-	for iter.Next(&mItem) {
+	for mq.Next(ctx) {
+		err := mq.Decode(&mItem)
 		// Check if context is still ok before to continue
-		if err = ctx.Err(); err != nil {
+		if err != nil {
 			// TODO bench this as net/context is using mutex under the hood
-			iter.Close()
+			mq.Close(ctx)
 			return nil, err
 		}
 		list.Items = append(list.Items, newItem(&mItem))
 	}
-	if err := iter.Close(); err != nil {
+	if err := mq.Close(ctx); err != nil {
 		return nil, err
 	}
 	// If the number of returned elements is lower than requested limit, or no
@@ -338,19 +296,10 @@ func (m Handler) Count(ctx context.Context, query *query.Query) (int, error) {
 	if err != nil {
 		return -1, err
 	}
-	c, err := m.c(ctx)
+	c, err := m(ctx)
 	if err != nil {
 		return -1, err
 	}
-	defer m.close(c)
-	mq := c.Find(q)
-	// Apply context deadline if any
-	if dl, ok := ctx.Deadline(); ok {
-		dur := time.Until(dl)
-		if dur < 0 {
-			dur = 0
-		}
-		mq.SetMaxTime(dur)
-	}
-	return mq.Count()
+	cnt, err := c.CountDocuments(ctx, q)
+	return int(cnt), err
 }
